@@ -83,6 +83,18 @@ def _delete_checkpoint() -> None:
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
+def _get_data_dir() -> str:
+    """Use data/train/ if a holdout split exists, otherwise data/."""
+    meta_path = Path(".holdout_meta.json")
+    if meta_path.exists():
+        import json
+        meta = json.loads(meta_path.read_text())
+        train_dir = meta["train_dir"]
+        print(f"Holdout split detected — ingesting train set only: {train_dir}")
+        return train_dir
+    return "data"
+
+
 def main():
     import argparse
     parser = argparse.ArgumentParser()
@@ -105,8 +117,9 @@ def main():
     chunks, done_batches = _load_checkpoint()
 
     if chunks is None:
-        print("Loading tickets from data/...")
-        tickets = load_tickets("data")
+        data_dir = _get_data_dir()
+        print(f"Loading tickets from {data_dir}/...")
+        tickets = load_tickets(data_dir)
         print(f"Loaded {len(tickets)} tickets")
 
         embedder = get_embedder()

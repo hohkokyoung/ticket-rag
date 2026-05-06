@@ -50,12 +50,19 @@ def print_hits(hits: list[dict]):
     console.print(table)
 
 
-def run_query(pipeline, ticket_text: str, retrieve_only: bool = False, top_k: int = 5):
+def run_query(pipeline, ticket_text: str, retrieve_only: bool = False, top_k: int = 3,
+              use_hyde: bool = False, use_mmr: bool = False):
     console.print(f"\n[bold]Query:[/bold] {ticket_text}\n")
+
+    flags = []
+    if use_hyde: flags.append("HyDE")
+    if use_mmr:  flags.append("MMR")
+    if flags:
+        console.print(f"[dim]Active improvements: {', '.join(flags)}[/dim]\n")
 
     with console.status("[bold green]Retrieving and reranking..."):
         if retrieve_only:
-            hits = pipeline.retrieve_only(ticket_text, top_k=top_k)
+            hits = pipeline.retrieve_only(ticket_text, top_k=top_k, use_hyde=use_hyde, use_mmr=use_mmr)
             console.print(f"\n[bold cyan]Top {len(hits)} retrieved tickets:[/bold cyan]")
             print_hits(hits)
             for i, hit in enumerate(hits, 1):
@@ -66,7 +73,14 @@ def run_query(pipeline, ticket_text: str, retrieve_only: bool = False, top_k: in
                 ))
             return
 
-        result = pipeline.query(ticket_text, top_k=top_k)
+        result = pipeline.query(ticket_text, top_k=top_k, use_hyde=use_hyde, use_mmr=use_mmr)
+
+    if result.hypothetical:
+        console.print(Panel(
+            result.hypothetical,
+            title="[dim]HyDE — hypothetical resolution used for search[/dim]",
+            border_style="dim",
+        ))
 
     console.print(f"[bold cyan]Retrieved {len(result.hits)} relevant tickets:[/bold cyan]")
     print_hits(result.hits)
@@ -112,7 +126,9 @@ def main():
     parser = argparse.ArgumentParser(description="Ticket RAG — find similar tickets and get AI-suggested resolutions")
     parser.add_argument("query", nargs="?", help="Ticket description (omit for interactive mode)")
     parser.add_argument("--retrieve-only", "-r", action="store_true", help="Show retrieved tickets without generation")
-    parser.add_argument("--top-k", type=int, default=5, help="Number of results to return (default: 5)")
+    parser.add_argument("--top-k", type=int, default=3, help="Number of results to return (default: 3)")
+    parser.add_argument("--hyde", action="store_true", help="Enable HyDE — search with hypothetical resolution embedding")
+    parser.add_argument("--mmr",  action="store_true", help="Enable MMR  — diversify results to avoid near-duplicates")
     args = parser.parse_args()
 
     with console.status("[bold green]Loading pipeline..."):
@@ -126,7 +142,8 @@ def main():
     console.print("[green]Pipeline ready.[/green]")
 
     if args.query:
-        run_query(pipeline, args.query, retrieve_only=args.retrieve_only, top_k=args.top_k)
+        run_query(pipeline, args.query, retrieve_only=args.retrieve_only,
+                  top_k=args.top_k, use_hyde=args.hyde, use_mmr=args.mmr)
     else:
         interactive_mode(pipeline, top_k=args.top_k)
 
