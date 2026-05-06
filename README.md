@@ -82,7 +82,14 @@ python scripts/ingest.py
 
 > First run downloads `multilingual-e5-large` (~2.3 GB) and embeds all tickets. Takes 10–20 min. Fully cached after — subsequent startups are instant.
 
-### 6. Query
+### 6. Train the category classifier (optional but recommended)
+```bash
+python scripts/train_classifier.py
+```
+
+Trains a lightweight LogisticRegression on top of frozen embeddings — no GPU, done in ~1 minute. Once trained, the pipeline automatically filters retrieval to the predicted category (when confidence ≥ 70%), improving Category Precision@1 from 64% → 70%.
+
+### 7. Query
 ```bash
 # Single query
 python main.py "Customer cannot log in after password reset"
@@ -144,12 +151,12 @@ The system was evaluated on **28,581 training tickets** with a **5,716-ticket ho
 
 | Metric | Score | What it means |
 |---|---|---|
-| **Category Precision@1** | **64%** | Top result from the correct support category (random baseline: 25%) |
-| **Category Precision@3** | **39%** | Signal drops at rank 2-3 — reranker is strongest at rank 1 |
-| **Category Precision@5** | **35%** | Approaches random past top-3; `TOP_K_RERANK=3` is the right default |
-| **Category MRR** | **0.698** | First relevant result appears around rank 1-2 on average |
+| **Category Precision@1** | **70%** | Top result from the correct support category (random baseline: 25%) |
+| **Category Precision@3** | **42%** | Signal drops at rank 2-3 — reranker is strongest at rank 1 |
+| **Category Precision@5** | **38%** | Approaches random past top-3; `TOP_K_RERANK=3` is the right default |
+| **Category MRR** | **0.762** | First relevant result appears around rank 1-2 on average |
 
-> Retrieval ground truth: a retrieved ticket is relevant if it shares the same support category as the query. With 4 categories, random chance = 25%. The system runs 2.5× above random at rank 1.
+> Retrieval ground truth: a retrieved ticket is relevant if it shares the same support category as the query. With 4 categories, random chance = 25%. The system runs 2.8× above random at rank 1.
 >
 > Note: the earlier non-holdout eval showed 100%@1 because the query ticket itself was in the index — retrieval was matching the exact document. The holdout numbers are the honest ones.
 
@@ -157,14 +164,22 @@ The system was evaluated on **28,581 training tickets** with a **5,716-ticket ho
 
 | Metric | Score | What it means |
 |---|---|---|
-| **Semantic Similarity** | **0.917** | Generated answers closely match human-written resolutions |
+| **Semantic Similarity** | **0.915** | Generated answers closely match human-written resolutions |
 | **LLM Judge** | **4.38 / 5** | 49 of 50 answers rated 4★ or 5★ by an independent LLM |
 | **Faithfulness** | **1.000** | No hallucination — every claim grounded in retrieved context |
-| **Answer Relevance** | **0.920** | Answers directly address what was asked |
+| **Answer Relevance** | **0.916** | Answers directly address what was asked |
 
-### Key finding — answer quality holds even when retrieval is imperfect
+### Key finding — category classifier improves retrieval with no generation cost
 
-Retrieval precision at rank 1 is 64%, but answer quality scores remain excellent (0.917 similarity, 4.38/5 judge). The LLM compensates well — loosely related context from the same support domain still produces useful resolutions. Improving retrieval to push Category Precision@1 above 80% is the clearest path to further gains.
+A lightweight LogisticRegression classifier (trained in seconds on frozen embeddings) predicts the incoming ticket's category and filters retrieval to that bucket — but only when confidence ≥ 70%. This lifted Category Precision@1 from 64% → 70% and MRR from 0.698 → 0.762 with no degradation to answer quality.
+
+| Metric | Without classifier | With classifier |
+|---|---|---|
+| Category Precision@1 | 64% | **70%** |
+| Category MRR | 0.698 | **0.762** |
+| Semantic Similarity | 0.917 | 0.915 |
+
+The confidence threshold matters: a hard filter (always apply) tanked precision to 34% because Incident and Problem tickets are inherently ambiguous (~70% F1 each). Skipping the filter when the classifier is uncertain recovers the baseline for those cases.
 
 ### Known limitations & applied fixes
 
@@ -178,6 +193,7 @@ Eval surfaced several issues that were subsequently fixed:
 | Top results were near-duplicates | Same ticket rephrased, not diverse angles | Added MMR (`--mmr`) |
 | Faithfulness called `pipeline.query()` twice | Doubled LLM calls, doubled eval runtime | Cache hits from similarity eval, reuse in faithfulness |
 | Semantic Recall@K metric was circular | Dense retrieval optimises cosine sim — any threshold gives ~100% | Reverted to Category Precision@K |
+| Hard category filter tanked precision to 34% | BM25 can't filter — wrong-category results flooded RRF fusion | Post-filter fused results by metadata + confidence threshold |
 
 ### Reproducing the eval
 

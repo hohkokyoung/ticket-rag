@@ -27,11 +27,12 @@ class RAGResult:
 
 
 class RAGPipeline:
-    def __init__(self, vector_store, bm25_index, embedder, reranker):
-        self._vs       = vector_store
-        self._bm25     = bm25_index
-        self._embedder = embedder
-        self._reranker = reranker
+    def __init__(self, vector_store, bm25_index, embedder, reranker, classifier=None):
+        self._vs         = vector_store
+        self._bm25       = bm25_index
+        self._embedder   = embedder
+        self._reranker   = reranker
+        self._classifier = classifier  # optional — None = unfiltered search
 
     def query(
         self,
@@ -55,11 +56,8 @@ class RAGPipeline:
         if filters:
             where = filters if len(filters) == 1 else {"$and": [{k: v} for k, v in filters.items()]}
 
-        # ── 1. Embed query ────────────────────────────────────────────────────
-        # HyDE: generate a hypothetical resolution and embed that instead.
-        # Dense search then matches resolution-shaped vectors against the index
-        # (which also contains resolutions) — much better semantic alignment.
-        # BM25 always uses the original query (keyword matching is unaffected).
+        # ── 0. Embed query (needed for classifier + dense search) ─────────────
+        # We embed early so the classifier can reuse the same vector.
         hypothetical: str | None = None
         if use_hyde:
             from src.retrieval.hyde import hyde_query_embedding
@@ -67,7 +65,23 @@ class RAGPipeline:
         else:
             dense_embedding = self._embedder.embed_query(ticket_text)
 
-        # ── 2. Hybrid search (dense + BM25 → RRF) ────────────────────────────
+        # ── Auto category filter via classifier ───────────────────────────────
+        # Only apply if confidence >= threshold (default 0.70).
+        # Incident vs Problem are inherently ambiguous — at low confidence the
+        # classifier picks the wrong bucket and wipes out all results.
+        # Skipping the filter for uncertain predictions is better than a wrong filter.
+        _CONFIDENCE_THRESHOLD = 0.70
+        if category_filter is None and self._classifier is not None:
+            proba = self._classifier.predict_proba(dense_embedding)
+            top_prob = max(proba.values())
+            if top_prob >= _CONFIDENCE_THRESHOLD:
+                predicted = max(proba, key=proba.get)
+                if where is None:
+                    where = {"category": predicted}
+                else:
+                    where = {"$and": [where, {"category": predicted}]}
+
+        # ── 1. Hybrid search (dense + BM25 → RRF) ────────────────────────────
         fused_hits = hybrid_search(
             query=ticket_text,               # BM25 always uses original
             query_embedding=dense_embedding,  # dense uses HyDE embedding if enabled
@@ -117,11 +131,22 @@ class RAGPipeline:
         else:
             dense_embedding = self._embedder.embed_query(ticket_text)
 
+        # Auto category filter — only when classifier is confident
+        _CONFIDENCE_THRESHOLD = 0.70
+        where: dict | None = None
+        if self._classifier is not None:
+            proba = self._classifier.predict_proba(dense_embedding)
+            top_prob = max(proba.values())
+            if top_prob >= _CONFIDENCE_THRESHOLD:
+                predicted = max(proba, key=proba.get)
+                where = {"category": predicted}
+
         fused_hits = hybrid_search(
             query=ticket_text,
             query_embedding=dense_embedding,
             vector_store=self._vs,
             bm25_index=self._bm25,
+            where=where,
         )
         reranked = self._reranker.rerank(ticket_text, fused_hits, top_k=top_k * 3)
 
@@ -137,6 +162,7 @@ def build_pipeline() -> RAGPipeline:
     from src.retrieval.vector_store import VectorStore
     from src.retrieval.bm25_index import BM25Index
     from src.retrieval.reranker import get_reranker
+    from src.retrieval.classifier import load_classifier
 
     embedder = get_embedder()
     vs   = VectorStore()
@@ -147,4 +173,12 @@ def build_pipeline() -> RAGPipeline:
     if not bm25.load():
         raise RuntimeError("BM25 index not found. Run `python scripts/ingest.py` first.")
 
-    return RAGPipeline(vs, bm25, embedder, get_reranker())
+    classifier = load_classifier()
+    if classifier:
+        from rich.console import Console
+        Console().print("[green]Category classifier loaded — retrieval will be filtered by predicted category.[/green]")
+    else:
+        from rich.console import Console
+        Console().print("[dim]No category classifier found. Run `python scripts/train_classifier.py` to enable category filtering.[/dim]")
+
+    return RAGPipeline(vs, bm25, embedder, get_reranker(), classifier=classifier)

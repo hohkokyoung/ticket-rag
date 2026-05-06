@@ -62,4 +62,16 @@ def hybrid_search(
     dense_hits = vector_store.query(query_embedding, n_results=n_dense, where=where)
     sparse_hits = bm25_index.query(query, n_results=n_sparse)
 
-    return reciprocal_rank_fusion([dense_hits, sparse_hits])
+    fused = reciprocal_rank_fusion([dense_hits, sparse_hits])
+
+    # BM25 has no metadata — it can't filter by category, so it contaminates
+    # the fused list with results from all categories when a filter is active.
+    # Post-filter: keep only hits whose metadata matches the where clause.
+    # Dense hits (already filtered by ChromaDB) pass; BM25 hits without
+    # matching metadata are dropped.
+    if where:
+        for key, val in where.items():
+            if not key.startswith("$"):  # skip operators like $and
+                fused = [h for h in fused if h.get("metadata", {}).get(key) == val]
+
+    return fused
